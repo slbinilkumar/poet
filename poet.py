@@ -5,6 +5,7 @@ import theano
 from theano import tensor
 
 from blocks.algorithms import (GradientDescent, Scale,
+                               RMSProp, Adam,
                                StepClipping, CompositeRule)
 from blocks.bricks import Tanh, Initializable
 from blocks.bricks.base import application
@@ -27,6 +28,7 @@ from fuel.datasets import OneBillionWord, TextFile
 from fuel.transformers import Mapping, Batch, Padding, Filter
 from fuel.schemes import ConstantScheme
 
+from blocks.extras.extensions.plot import Plot  
 config.recursion_limit = 100000
 floatX = theano.config.floatX
 
@@ -107,8 +109,12 @@ class Write(SimpleExtension):
         print "".join(code2char[code[0]] for code in outputs)
 
 
-poet = Poet(dimension = 200, depth = 3, alphabet_size = len(char2code), name="poet")
-poet.weights_init = IsotropicGaussian(0.1)
+poet = Poet(dimension = 200,
+            depth = 3,
+            alphabet_size = len(char2code),
+            name="poet")
+
+poet.weights_init = IsotropicGaussian(0.05)
 poet.biases_init = Constant(0.0)
 
 dataset_options = dict(dictionary=char2code, level="character",
@@ -119,7 +125,7 @@ dataset = OneBillionWord("training", [99], **dataset_options)
 
 data_stream = dataset.get_example_stream()
 data_stream = Filter(data_stream, _filter_long)
-data_stream = Batch(data_stream, iteration_scheme=ConstantScheme(10))
+data_stream = Batch(data_stream, iteration_scheme=ConstantScheme(100))
 data_stream = Padding(data_stream)
 data_stream = Mapping(data_stream, _transpose)
 
@@ -139,21 +145,29 @@ for brick in model.get_top_bricks():
 cg = ComputationGraph(cost)
 algorithm = GradientDescent(
     cost=cost, params=cg.parameters,
-    step_rule=CompositeRule([StepClipping(10.0), Scale(0.01)]))
+    step_rule=CompositeRule([StepClipping(10.0), Adam(0.01)]))
 
 monitor = TrainingDataMonitoring(
     variables=[cost],
-    after_epoch=True,
+    every_n_batches = 100,
     prefix="test")
+
+extensions = extensions=[
+    monitor,
+    Printing(every_n_batches = 100),
+    Write(poet = model.get_top_bricks()[0], every_n_batches = 100)
+    ]
+
+plot = True
+if plot:
+    extensions.append(Plot('Poet', 
+                            channels = [['test_sequence_log_likelihood']],
+                            every_n_batches = 100))
 
 main_loop = MainLoop(
     model=model,
     data_stream=data_stream,
     algorithm=algorithm,
-    extensions=[
-    monitor,
-    Printing(),
-    Write(poet = model.get_top_bricks()[0],after_epoch = True)
-    ])
+    extensions = extensions)
 
 main_loop.run()
