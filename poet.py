@@ -17,7 +17,8 @@ from blocks.bricks.sequence_generators import (
 from blocks.config import config
 from blocks.extensions import FinishAfter, Printing
 from blocks.extensions.saveload import SimpleExtension
-from blocks.extensions.monitoring import TrainingDataMonitoring
+from blocks.extensions.monitoring import (TrainingDataMonitoring,
+                                    DataStreamMonitoring)
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Constant
 from blocks.main_loop import MainLoop
@@ -65,7 +66,9 @@ class Poet(Initializable):
 
         readout = Readout(
             readout_dim=alphabet_size,
-            source_names=[transition.apply.states[0]],
+            # Only the states of the last lstm will
+            # be used during the readout.
+            source_names=[transition.apply.states[-2]],
             emitter=SoftmaxEmitter(name="emitter"),
             feedback_brick=LookupFeedback(alphabet_size, dimension),
             name="readout")
@@ -109,7 +112,7 @@ class Write(SimpleExtension):
         print "".join(code2char[code[0]] for code in outputs)
 
 
-poet = Poet(dimension = 200,
+poet = Poet(dimension = 800,
             depth = 3,
             alphabet_size = len(char2code),
             name="poet")
@@ -129,6 +132,13 @@ data_stream = Batch(data_stream, iteration_scheme=ConstantScheme(100))
 data_stream = Padding(data_stream)
 data_stream = Mapping(data_stream, _transpose)
 
+test_dataset = OneBillionWord("heldout", [1], **dataset_options)
+test_stream = dataset.get_example_stream()
+test_stream = Filter(test_stream, _filter_long)
+test_stream = Batch(test_stream, iteration_scheme=ConstantScheme(1000))
+test_stream = Padding(test_stream)
+test_stream = Mapping(test_stream, _transpose)
+
 # Build the cost computation graph
 chars = tensor.lmatrix("features")
 chars_mask = tensor.matrix("features_mask")
@@ -143,17 +153,26 @@ for brick in model.get_top_bricks():
     brick.initialize()
 
 cg = ComputationGraph(cost)
+
 algorithm = GradientDescent(
     cost=cost, params=cg.parameters,
-    step_rule=CompositeRule([StepClipping(10.0), Adam(0.01)]))
+    step_rule=CompositeRule([StepClipping(10.0), Adam(0.005)]))
 
-monitor = TrainingDataMonitoring(
+train_monitor = TrainingDataMonitoring(
     variables=[cost],
     every_n_batches = 100,
-    prefix="test")
+    prefix="train")
+
+test_monitor = DataStreamMonitoring(
+    variables = [cost],
+    data_stream = test_stream,
+    after_epoch = False,
+    every_n_batches = 1000,
+    prefix = "test")
 
 extensions = extensions=[
-    monitor,
+    train_monitor,
+    test_monitor,
     Printing(every_n_batches = 100),
     Write(poet = model.get_top_bricks()[0], every_n_batches = 100)
     ]
@@ -161,7 +180,8 @@ extensions = extensions=[
 plot = True
 if plot:
     extensions.append(Plot('Poet', 
-                            channels = [['test_sequence_log_likelihood']],
+                            channels = [['train_sequence_log_likelihood',
+                                         'test_sequence_log_likelihood']],
                             every_n_batches = 100))
 
 main_loop = MainLoop(
